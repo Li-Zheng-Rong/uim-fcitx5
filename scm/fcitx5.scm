@@ -7,10 +7,12 @@
   (append context-rec-spec
           '((handle #f)
             (fd #f)
+            (watch-flags #f)
             (client-preedit ())
             (panel-preedit ())
             (aux-up "")
             (aux-down "")
+            (rendered-preedit #f)
             (candidates ())
             (candidate-index -1)
             (showing-candidates #f)
@@ -26,9 +28,19 @@
     (if (fcitx5-context-fd c)
         (uim-fep-unwatch-fd (fcitx5-context-fd c)))
     (fcitx5-context-set-fd! c #f)
+    (fcitx5-context-set-watch-flags! c #f)
     (if (fcitx5-context-handle c)
         (fcitx5-native-abandon (fcitx5-context-handle c)))
     (fcitx5-context-set-handle! c #f)))
+
+(define fcitx5-sync-watch!
+  (lambda (c)
+    (if (fcitx5-context-handle c)
+        (let ((flags (fcitx5-native-watch-flags (fcitx5-context-handle c))))
+          (if (not (equal? flags (fcitx5-context-watch-flags c)))
+              (begin
+                (uim-fep-update-fd (fcitx5-context-fd c) flags)
+                (fcitx5-context-set-watch-flags! c flags)))))))
 
 (define fcitx5-clear!
   (lambda (c)
@@ -49,48 +61,79 @@
                      panel
                      (fcitx5-context-client-preedit c)))
            (aux (string-append (fcitx5-context-aux-up c)
-                               (fcitx5-context-aux-down c))))
-      (context-update-preedit
-       c (if (string=? aux "") main
-             (append main (list (cons preedit-none (string-append " " aux)))))))))
+                               (fcitx5-context-aux-down c)))
+           (segments (if (string=? aux "") main
+                         (append main (list (cons preedit-none (string-append " " aux)))))))
+      (if (not (equal? segments (fcitx5-context-rendered-preedit c)))
+          (begin
+            (context-update-preedit c segments)
+            (fcitx5-context-set-rendered-preedit! c segments))))))
 
 (define fcitx5-update-candidates!
   (lambda (c candidates index)
-    (if (not (equal? candidates (fcitx5-context-candidates c)))
-        (begin
-          (if (fcitx5-context-showing-candidates c)
-              (im-deactivate-candidate-selector c))
-          (fcitx5-context-set-showing-candidates! c #f)
-          (fcitx5-context-set-candidates! c candidates)
-          (if (pair? candidates)
-              (begin
-                ;; Fcitx sends the current page only. Do not invent a total.
-                (im-activate-candidate-selector c (length candidates) (length candidates))
-                (fcitx5-context-set-showing-candidates! c #t)))))
-    (fcitx5-context-set-candidate-index! c index)
-    (if (and (fcitx5-context-showing-candidates c)
-             (>= index 0) (< index (length candidates)))
-        (im-select-candidate c index))))
+    (let ((page-changed? (not (equal? candidates (fcitx5-context-candidates c))))
+          (index-changed? (not (= index (fcitx5-context-candidate-index c)))))
+      (if page-changed?
+          (begin
+            (if (fcitx5-context-showing-candidates c)
+                (im-deactivate-candidate-selector c))
+            (fcitx5-context-set-showing-candidates! c #f)
+            (fcitx5-context-set-candidates! c candidates)
+            (if (pair? candidates)
+                (let ((count (length candidates)))
+                  ;; Fcitx sends the current page only. Do not invent a total.
+                  (im-activate-candidate-selector c count count)
+                  (fcitx5-context-set-showing-candidates! c #t)))))
+      (if index-changed? (fcitx5-context-set-candidate-index! c index))
+      (if (and (or page-changed? index-changed?)
+               (fcitx5-context-showing-candidates c)
+               (>= index 0) (< index (length candidates)))
+          (im-select-candidate c index)))))
 
 (define fcitx5-apply-events!
   (lambda (c events)
-    (let ((preedit-changed? #f))
+    (let ((preedit-changed? #f)
+          (mode-changed? #f))
       (for-each
        (lambda (event)
          (case (car event)
-           ((commit) (im-commit c (cadr event)))
+           ((commit)
+            (im-commit c (cadr event))
+            ;; A following equal preedit still belongs after this commit.
+            (fcitx5-context-set-rendered-preedit! c #f))
            ((preedit)
-            (fcitx5-context-set-client-preedit! c (cadr event))
-            (set! preedit-changed? #t))
+            (if (not (equal? (cadr event) (fcitx5-context-client-preedit c)))
+                (begin
+                  (fcitx5-context-set-client-preedit! c (cadr event))
+                  (set! preedit-changed? #t)))
+            (if (not (fcitx5-context-rendered-preedit c))
+                (set! preedit-changed? #t)))
            ((panel)
-            (fcitx5-context-set-panel-preedit! c (list-ref event 1))
-            (fcitx5-context-set-aux-up! c (list-ref event 2))
-            (fcitx5-context-set-aux-down! c (list-ref event 3))
+            (let ((preedit (list-ref event 1))
+                  (aux-up (list-ref event 2))
+                  (aux-down (list-ref event 3)))
+              (if (not (equal? preedit (fcitx5-context-panel-preedit c)))
+                  (begin
+                    (fcitx5-context-set-panel-preedit! c preedit)
+                    (set! preedit-changed? #t)))
+              (if (not (string=? aux-up (fcitx5-context-aux-up c)))
+                  (begin
+                    (fcitx5-context-set-aux-up! c aux-up)
+                    (set! preedit-changed? #t)))
+              (if (not (string=? aux-down (fcitx5-context-aux-down c)))
+                  (begin
+                    (fcitx5-context-set-aux-down! c aux-down)
+                    (set! preedit-changed? #t))))
             (fcitx5-update-candidates! c (list-ref event 4) (list-ref event 5))
-            (set! preedit-changed? #t))
+            (if (not (fcitx5-context-rendered-preedit c))
+                (set! preedit-changed? #t)))
            ((mode)
-            (fcitx5-context-set-mode-name! c (cadr event))
-            (fcitx5-context-set-mode-id! c (caddr event)))
+            (if (not (string=? (cadr event) (fcitx5-context-mode-name c)))
+                (begin
+                  (fcitx5-context-set-mode-name! c (cadr event))
+                  (set! mode-changed? #t)))
+            (if (not (string=? (caddr event) (fcitx5-context-mode-id c)))
+                (fcitx5-context-set-mode-id! c (caddr event))))
            ((focus-out)
             (fcitx5-clear! c)
             (set! preedit-changed? #t))
@@ -100,33 +143,40 @@
             ;; establish a fresh context after the original failure is shown.
             (fcitx5-disconnect! c)
             (fcitx5-clear! c)
-            (fcitx5-context-set-mode-name! c "Fcitx5 unavailable")
+            (if (not (string=? (fcitx5-context-mode-name c) "Fcitx5 unavailable"))
+                (begin
+                  (fcitx5-context-set-mode-name! c "Fcitx5 unavailable")
+                  (set! mode-changed? #t)))
             (fcitx5-context-set-mode-id! c "")
             (fcitx5-notice (cadr event))
             (set! preedit-changed? #t))))
        events)
       (if preedit-changed? (fcitx5-render-preedit! c))
-      (context-update-widgets c))))
+      (if mode-changed? (context-update-widgets c))
+      (fcitx5-sync-watch! c))))
 
 (define fcitx5-connect!
   (lambda (c)
     (or (fcitx5-context-handle c)
-        (if (not (symbol-bound? 'uim-fep-watch-fd))
+        (if (not (and (symbol-bound? 'uim-fep-watch-fd)
+                      (symbol-bound? 'uim-fep-update-fd)))
             (begin
               (fcitx5-notice "This engine requires uim-fep with the descriptor-watch patch.")
               #f)
             (let ((handle (fcitx5-native-open)))
               (if (string? handle)
                   (begin (fcitx5-notice handle) #f)
-                  (let ((fd (fcitx5-native-fd handle)))
+                  (let ((fd (fcitx5-native-fd handle))
+                        (flags (fcitx5-native-watch-flags handle)))
                     (if (uim-fep-watch-fd
-                         fd (lambda ()
+                         fd flags (lambda ()
                               (if (fcitx5-context-handle c)
                                   (fcitx5-apply-events!
                                    c (fcitx5-native-dispatch (fcitx5-context-handle c))))))
                         (begin
                           (fcitx5-context-set-handle! c handle)
                           (fcitx5-context-set-fd! c fd)
+                          (fcitx5-context-set-watch-flags! c flags)
                           handle)
                         (begin
                           (fcitx5-native-abandon handle)
@@ -145,6 +195,7 @@
       (if (fcitx5-context-fd c)
           (uim-fep-unwatch-fd (fcitx5-context-fd c)))
       (fcitx5-context-set-fd! c #f)
+      (fcitx5-context-set-watch-flags! c #f)
       (fcitx5-context-set-handle! c #f)
       (if handle (fcitx5-apply-events! c (fcitx5-native-close handle))))))
 

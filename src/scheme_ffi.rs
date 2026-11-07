@@ -73,11 +73,16 @@ pub fn pair(head: &Root, tail: &Root) -> Root {
     Root::new(unsafe { uim_scm_cons(head.value(), tail.value()) })
 }
 
-pub fn list(values: impl IntoIterator<Item = Root>) -> Root {
-    let values: Vec<Root> = values.into_iter().collect();
+pub fn list<I>(values: I) -> Root
+where
+    I: IntoIterator<Item = Root>,
+    I::IntoIter: DoubleEndedIterator,
+{
     let mut result = Root::new(unsafe { uim_scm_null() });
-    for value in values.iter().rev() {
-        result = pair(value, &result);
+    for value in values.into_iter().rev() {
+        // Both cons operands stay protected during allocation. Update the
+        // existing stable root before dropping the element's own root.
+        *result.0 = unsafe { uim_scm_cons(value.value(), result.value()) };
     }
     result
 }

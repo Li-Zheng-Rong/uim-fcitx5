@@ -21,7 +21,8 @@ fn segment(attributes: i64, text: &str) -> Root {
 }
 
 fn preedit(text: FormattedText, cursor: i32) -> Root {
-    let mut segments = Vec::new();
+    // Splitting at the cursor adds at most two segments to the input list.
+    let mut segments = Vec::with_capacity(text.len() + 2);
     let mut offset = 0;
     let mut cursor_added = false;
     for (text, flags) in text {
@@ -87,7 +88,7 @@ fn forwarded_text(keysym: u32, state: u32) -> Option<String> {
     if codepoint == 0 {
         return None;
     }
-    let mut text = String::new();
+    let mut text = String::with_capacity(5); // optional Escape + one UTF-8 scalar
     if state & ALT != 0 {
         text.push('\x1b');
     }

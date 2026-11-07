@@ -105,9 +105,16 @@ impl Backend {
         Ok(backend)
     }
 
-    /// The connection stays on this fd for its lifetime. Watch it for reads.
+    /// The connection stays on this fd for its lifetime.
     pub fn fd(&self) -> RawFd {
         self.channel.watch().fd
+    }
+
+    /// Refresh after every operation: queued output needs writable readiness
+    /// until libdbus has flushed it, including a final key release at idle.
+    pub fn watch_flags(&self) -> u32 {
+        let watch = self.channel.watch();
+        u32::from(watch.read) | (u32::from(watch.write) << 1)
     }
 
     /// Drain libdbus's existing queue as well as newly readable socket data.
@@ -199,8 +206,34 @@ impl Backend {
 
     pub fn process_key(&mut self, keysym: u32, state: u32, release: bool) -> Result<KeyResult> {
         // UIM supplies logical keys without a hardware keycode or timestamp.
+        if release {
+            // Terminal releases carry no bytes and need no filtering decision.
+            // Send on the same channel to retain press/release/key ordering;
+            // dispatch and writable watches finish any buffered output.
+            let result = Self::message(
+                &self.owner,
+                &self.path,
+                INPUT_CONTEXT_INTERFACE,
+                "ProcessKeyEvent",
+                (keysym, 0_u32, state, true, 0_u32),
+            )
+            .and_then(|mut message| {
+                message.set_no_reply(true);
+                self.channel
+                    .send(message)
+                    .map(|_| ())
+                    .map_err(|()| Error::new_failed("Unable to queue Fcitx5 key release"))
+            });
+            return Ok(KeyResult {
+                handled: true,
+                events: match result {
+                    Ok(()) => self.dispatch()?,
+                    Err(error) => self.failed_call("key release send", error),
+                },
+            });
+        }
         let handled = match self
-            .call::<_, (bool,)>("ProcessKeyEvent", (keysym, 0_u32, state, release, 0_u32))
+            .call::<_, (bool,)>("ProcessKeyEvent", (keysym, 0_u32, state, false, 0_u32))
         {
             Ok((handled,)) => handled,
             Err(error) => {
@@ -248,12 +281,25 @@ impl Backend {
         method: &str,
         args: A,
     ) -> Result<R> {
+        channel
+            .send_with_reply_and_block(
+                Self::message(destination, path, interface, method, args)?,
+                CALL_TIMEOUT,
+            )?
+            .read_all()
+    }
+
+    fn message<A: AppendAll>(
+        destination: &str,
+        path: &str,
+        interface: &str,
+        method: &str,
+        args: A,
+    ) -> Result<Message> {
         let mut message = Message::new_method_call(destination, path, interface, method)
             .map_err(|error| Error::new_failed(&error))?;
         message.append_all(args);
-        channel
-            .send_with_reply_and_block(message, CALL_TIMEOUT)?
-            .read_all()
+        Ok(message)
     }
 
     fn event(&self, message: &Message) -> Result<Option<Event>> {

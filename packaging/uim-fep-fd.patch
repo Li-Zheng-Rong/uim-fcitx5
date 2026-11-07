@@ -16,29 +16,56 @@
    g_context = uim_create_context(NULL, get_enc(), NULL, engine, NULL, commit_cb);
    nr = uim_get_nr_im(g_context);
    for (i = 0; i < nr; i++) {
-@@ -1114,7 +1116,7 @@
+@@ -1072,7 +1074,7 @@
+ {
+   char buf[BUFSIZE];
+   ssize_t len;
+-  fd_set fds;
++  fd_set fds, writefds;
+   int nfd;
+   char *clear_screen_seq = cut_padding(clear_screen);
+   char *clr_eos_seq = cut_padding(clr_eos);
+@@ -1106,6 +1108,7 @@
+     if (is_commit_and_preedit()) {
+       struct timeval t;
+       FD_ZERO(&fds);
++      FD_ZERO(&writefds);
+       FD_SET(g_win_in, &fds);
+       FD_SET(s_master, &fds);
+       if (s_setmode_fd >= 0) {
+@@ -1114,7 +1117,8 @@
        t.tv_sec = 0;
        /* 0.1秒 */
        t.tv_usec = 100000;
 -      if (my_select(nfd, &fds, &t) == 0) {
-+      if (my_select(add_scheme_fd_watches(&fds, nfd), &fds, &t) == 0) {
++      if (my_select(add_scheme_fd_watches(&fds, &writefds, nfd),
++                    &fds, &writefds, &t) == 0) {
          /* タイムアウトした */
          draw_commit_and_preedit();
          debug2(("<end draw_commit_and_preedit>"));
-@@ -1140,7 +1142,7 @@
+@@ -1122,6 +1126,7 @@
+     }
+ 
+     FD_ZERO(&fds);
++    FD_ZERO(&writefds);
+     FD_SET(g_win_in, &fds);
+     FD_SET(s_master, &fds);
+     if (s_setmode_fd >= 0) {
+@@ -1140,7 +1145,8 @@
        timeout_ptr = &timeout;
      }
  
 -    selected = my_pselect(nfd, &fds, timeout_ptr, &s_orig_sigmask);
-+    selected = my_pselect(add_scheme_fd_watches(&fds, nfd), &fds, timeout_ptr, &s_orig_sigmask);
++    selected = my_pselect(add_scheme_fd_watches(&fds, &writefds, nfd),
++                          &fds, &writefds, timeout_ptr, &s_orig_sigmask);
      if (selected == 0) {
        flush_pending_pty_sequence();
        continue;
-@@ -1183,6 +1185,11 @@
+@@ -1183,6 +1189,11 @@
      }
  
      /* モードを変更する */
-+    if (dispatch_scheme_fd_watches(&fds)) {
++    if (dispatch_scheme_fd_watches(&fds, &writefds)) {
 +      recover_if_fatal();
 +      draw();
 +    }
@@ -46,7 +73,16 @@
      if (s_setmode_fd >= 0 && FD_ISSET(s_setmode_fd, &fds)) {
        int start, end;
  
-@@ -1633,6 +1640,11 @@
+@@ -1292,7 +1303,7 @@
+               FD_SET(g_win_in, &fds);
+               t.tv_sec = 0;
+               t.tv_usec = g_opt.timeout;
+-              if (my_select(g_win_in + 1, &fds, &t) > 0) {
++              if (my_select(g_win_in + 1, &fds, NULL, &t) > 0) {
+                 ssize_t nr;
+ 
+                 if ((nr = read_stdin(buf + len, sizeof(buf) - len - 1)) != -1) {
+@@ -1633,6 +1644,11 @@
  void done(int exit_value)
  {
    flush_pending_pty_sequence();
@@ -58,21 +94,91 @@
    uim_quit();
    quit_helper();
    quit_escseq();
+--- a/fep/read.c
++++ b/fep/read.c
+@@ -69,32 +69,37 @@
+  * select
+  * ungetがあるときはselectを呼ばない. 
+  */
+-int my_select(int n, fd_set *readfds, struct timeval *timeout)
++int my_select(int n, fd_set *readfds, fd_set *writefds, struct timeval *timeout)
+ {
+   if (s_buf_size > 0) {
+     FD_ZERO(readfds);
+     FD_SET(g_win_in, readfds);
++    if (writefds)
++      FD_ZERO(writefds);
+     return 1;
+   }
+-  return select(n, readfds, NULL, NULL, timeout);
++  return select(n, readfds, writefds, NULL, timeout);
+ }
+ 
+ /*
+  * pselect
+  * ungetがあるときはpselectを呼ばない. 
+  */
+-int my_pselect(int n, fd_set *readfds, const struct timespec *timeout,
++int my_pselect(int n, fd_set *readfds, fd_set *writefds,
++               const struct timespec *timeout,
+                const sigset_t *sigmask)
+ {
+   if (s_buf_size > 0) {
+     FD_ZERO(readfds);
+     FD_SET(g_win_in, readfds);
++    if (writefds)
++      FD_ZERO(writefds);
+     return 1;
+   }
+ #ifdef HAVE_PSELECT
+-  return pselect(n, readfds, NULL, NULL, timeout, sigmask);
++  return pselect(n, readfds, writefds, NULL, timeout, sigmask);
+ #else
+-  return pselect_(n, readfds, NULL, NULL, timeout, sigmask);
++  return pselect_(n, readfds, writefds, NULL, timeout, sigmask);
+ #endif
+ }
+ 
+--- a/fep/read.h
++++ b/fep/read.h
+@@ -48,8 +48,9 @@
+ #endif
+ #include <time.h>
+ 
+-int my_select(int n, fd_set *readfds, struct timeval *timeout);
+-int my_pselect(int n, fd_set *readfds, const struct timespec *timeout,
++int my_select(int n, fd_set *readfds, fd_set *writefds, struct timeval *timeout);
++int my_pselect(int n, fd_set *readfds, fd_set *writefds,
++               const struct timespec *timeout,
+                const sigset_t *sigmask);
+ ssize_t read_stdin(void *buf, int count);
+ void unget_stdin(const char *str, int count);
 --- /dev/null
 +++ b/fep/scheme-fd-watch.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,162 @@
 +/* Main-thread Scheme descriptor watches for native input-method plugins. */
 +#ifndef UIM_FEP_SCHEME_FD_WATCH_H
 +#define UIM_FEP_SCHEME_FD_WATCH_H
 +
 +#include <uim/uim-scm.h>
 +
++enum scheme_fd_interest {
++  SCHEME_FD_READ = 1,
++  SCHEME_FD_WRITE = 2
++};
++
 +struct scheme_fd_watch {
-+  int fd;
++  int fd, interest, ready, removed;
 +  uim_lisp callback;
-+  struct scheme_fd_watch *next;
++  struct scheme_fd_watch *next, *ready_next;
 +};
 +static struct scheme_fd_watch *scheme_fd_watches;
++
++static void free_scheme_fd_watch(struct scheme_fd_watch *watch)
++{
++  uim_scm_gc_unprotect(&watch->callback);
++  free(watch);
++}
 +
 +static uim_lisp scheme_unwatch_fd(uim_lisp descriptor)
 +{
@@ -82,8 +188,11 @@
 +    struct scheme_fd_watch *watch = *link;
 +    if (watch->fd == fd) {
 +      *link = watch->next;
-+      uim_scm_gc_unprotect(&watch->callback);
-+      free(watch);
++      /* The ready snapshot may still refer to this registration. A new
++       * registration for the same fd must not inherit its readiness. */
++      watch->removed = 1;
++      if (!watch->ready)
++        free_scheme_fd_watch(watch);
 +      break;
 +    }
 +    link = &watch->next;
@@ -91,20 +200,27 @@
 +  return uim_scm_f();
 +}
 +
-+static uim_lisp scheme_watch_fd(uim_lisp descriptor, uim_lisp callback)
++static uim_lisp scheme_watch_fd(uim_lisp descriptor, uim_lisp flags,
++                                uim_lisp callback)
 +{
 +  int fd = uim_scm_c_int(descriptor);
++  int interest = uim_scm_c_int(flags);
 +  struct scheme_fd_watch *watch;
-+  if (fd < 0 || fd >= FD_SETSIZE)
++  if (fd < 0 || fd >= FD_SETSIZE ||
++      (interest & ~(SCHEME_FD_READ | SCHEME_FD_WRITE)))
 +    return uim_scm_f();
 +  for (watch = scheme_fd_watches; watch; watch = watch->next) {
 +    if (watch->fd == fd) {
-+      watch->callback = callback;
-+      return uim_scm_t();
++      /* Callback replacement is a new registration; only update-fd
++       * preserves identity and pending readiness. */
++      scheme_unwatch_fd(descriptor);
++      break;
 +    }
 +  }
 +  watch = uim_malloc(sizeof(*watch));
 +  watch->fd = fd;
++  watch->interest = interest;
++  watch->ready = watch->removed = 0;
 +  watch->callback = callback;
 +  watch->next = scheme_fd_watches;
 +  uim_scm_gc_protect(&watch->callback);
@@ -112,10 +228,27 @@
 +  return uim_scm_t();
 +}
 +
++static uim_lisp scheme_update_fd(uim_lisp descriptor, uim_lisp flags)
++{
++  int fd = uim_scm_c_int(descriptor);
++  int interest = uim_scm_c_int(flags);
++  struct scheme_fd_watch *watch;
++  if (interest & ~(SCHEME_FD_READ | SCHEME_FD_WRITE))
++    return uim_scm_f();
++  for (watch = scheme_fd_watches; watch; watch = watch->next) {
++    if (watch->fd == fd) {
++      watch->interest = interest;
++      return uim_scm_t();
++    }
++  }
++  return uim_scm_f();
++}
++
 +static void *register_scheme_fd_watches(void *unused)
 +{
 +  (void)unused;
-+  uim_scm_init_proc2("uim-fep-watch-fd", scheme_watch_fd);
++  uim_scm_init_proc3("uim-fep-watch-fd", scheme_watch_fd);
++  uim_scm_init_proc2("uim-fep-update-fd", scheme_update_fd);
 +  uim_scm_init_proc1("uim-fep-unwatch-fd", scheme_unwatch_fd);
 +  return NULL;
 +}
@@ -125,39 +258,53 @@
 +  uim_scm_call_with_gc_ready_stack(register_scheme_fd_watches, NULL);
 +}
 +
-+static int add_scheme_fd_watches(fd_set *fds, int nfd)
++static int add_scheme_fd_watches(fd_set *readfds, fd_set *writefds, int nfd)
 +{
 +  struct scheme_fd_watch *watch;
 +  for (watch = scheme_fd_watches; watch; watch = watch->next) {
-+    FD_SET(watch->fd, fds);
-+    if (watch->fd >= nfd)
++    if (watch->interest & SCHEME_FD_READ)
++      FD_SET(watch->fd, readfds);
++    if (watch->interest & SCHEME_FD_WRITE)
++      FD_SET(watch->fd, writefds);
++    if (watch->interest && watch->fd >= nfd)
 +      nfd = watch->fd + 1;
 +  }
 +  return nfd;
 +}
 +
-+static int dispatch_scheme_fd_watches(fd_set *fds)
++static int dispatch_scheme_fd_watches(fd_set *readfds, fd_set *writefds)
 +{
-+  int fd, dispatched = 0;
-+  /* Look up each live registration afresh: a callback may unwatch or close
-+   * itself or another descriptor. No watch pointer survives the call. */
-+  for (fd = 0; fd < FD_SETSIZE; fd++) {
-+    struct scheme_fd_watch *watch;
-+    if (!FD_ISSET(fd, fds))
-+      continue;
-+    for (watch = scheme_fd_watches; watch; watch = watch->next) {
-+      if (watch->fd == fd) {
-+        uim_lisp result = uim_scm_call_with_guard(uim_scm_eof(),
-+                                                  watch->callback,
-+                                                  uim_scm_null());
-+        if (result == uim_scm_eof()) {
-+          fprintf(stderr, "uim-fep: Scheme callback failed for descriptor %d\n", fd);
-+          scheme_unwatch_fd(uim_scm_make_int(fd));
-+        }
-+        dispatched = 1;
-+        break;
-+      }
++  struct scheme_fd_watch *watch, *ready = NULL, **tail = &ready;
++  int dispatched = 0;
++  /* Snapshot registrations, not descriptor numbers. The nodes themselves
++   * hold this temporary queue, so idle/PTY events allocate nothing. */
++  for (watch = scheme_fd_watches; watch; watch = watch->next) {
++    watch->ready =
++      (FD_ISSET(watch->fd, readfds) ? SCHEME_FD_READ : 0) |
++      (FD_ISSET(watch->fd, writefds) ? SCHEME_FD_WRITE : 0);
++    watch->ready &= watch->interest;
++    if (watch->ready) {
++      *tail = watch;
++      tail = &watch->ready_next;
 +    }
++  }
++  *tail = NULL;
++  while ((watch = ready)) {
++    ready = watch->ready_next;
++    if (!watch->removed && (watch->ready & watch->interest)) {
++      uim_lisp result = uim_scm_call_with_guard(uim_scm_eof(),
++                                                watch->callback,
++                                                uim_scm_null());
++      if (result == uim_scm_eof()) {
++        fprintf(stderr, "uim-fep: Scheme callback failed for descriptor %d\n", watch->fd);
++        if (!watch->removed)
++          scheme_unwatch_fd(uim_scm_make_int(watch->fd));
++      }
++      dispatched = 1;
++    }
++    watch->ready = 0;
++    if (watch->removed)
++      free_scheme_fd_watch(watch);
 +  }
 +  return dispatched;
 +}
@@ -167,8 +314,7 @@
 +  while (scheme_fd_watches) {
 +    struct scheme_fd_watch *watch = scheme_fd_watches;
 +    scheme_fd_watches = watch->next;
-+    uim_scm_gc_unprotect(&watch->callback);
-+    free(watch);
++    free_scheme_fd_watch(watch);
 +  }
 +}
 +#endif

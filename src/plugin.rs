@@ -31,6 +31,10 @@ extern "C" fn fd(handle: Value) -> Value {
     scm::integer(backend(handle).fd().into()).value()
 }
 
+extern "C" fn watch_flags(handle: Value) -> Value {
+    scm::integer(backend(handle).watch_flags().into()).value()
+}
+
 extern "C" fn dispatch(handle: Value) -> Value {
     output(backend(handle).dispatch())
 }
@@ -115,6 +119,7 @@ pub extern "C" fn uim_dynlib_instance_init() {
     unsafe {
         scm::uim_scm_init_proc0(c"fcitx5-native-open".as_ptr(), open);
         scm::uim_scm_init_proc1(c"fcitx5-native-fd".as_ptr(), fd);
+        scm::uim_scm_init_proc1(c"fcitx5-native-watch-flags".as_ptr(), watch_flags);
         scm::uim_scm_init_proc1(c"fcitx5-native-dispatch".as_ptr(), dispatch);
         scm::uim_scm_init_proc1(c"fcitx5-native-focus-in".as_ptr(), focus_in);
         scm::uim_scm_init_proc1(c"fcitx5-native-focus-out".as_ptr(), focus_out);
