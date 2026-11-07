@@ -1,0 +1,45 @@
+# UIM's existing terminal frontend, with native-plugin descriptor callbacks.
+pkgname=uim-console
+pkgver=1.9.8
+pkgrel=5
+pkgdesc='UIM console frontend with file descriptor callbacks for input engines'
+arch=('x86_64')
+url='https://github.com/uim/uim'
+license=('BSD-3-Clause')
+depends=('glibc' 'gcc-libs' 'libedit' 'ncurses' 'sqlite')
+makedepends=('gettext')
+conflicts=('uim')
+options=('!debug')
+source=("https://github.com/uim/uim/releases/download/$pkgver/uim-$pkgver.tar.gz"
+        'uim-fep-f13.patch'
+        'uim-fep-fd.patch')
+
+prepare() {
+  cd "uim-$pkgver"
+  patch -Np1 -i "$srcdir/uim-fep-f13.patch"
+  patch -Np1 -i "$srcdir/uim-fep-fd.patch"
+}
+
+build() {
+  cd "uim-$pkgver"
+  ./configure --prefix=/usr --libexecdir=/usr/lib/uim \
+    --without-x --without-gtk3 --without-gtk4 --without-wayland \
+    --without-m17nlib --without-anthy --without-anthy-utf8 \
+    --without-mozc --without-skk --disable-emacs --disable-pref \
+    --disable-gnome3-applet --disable-kde-applet --disable-tde-applet \
+    --disable-kde4-applet --disable-kde5-applet --disable-notify
+  make CFLAGS+=' -Wno-deprecated-declarations -Wno-error=incompatible-pointer-types'
+}
+
+package() {
+  cd "uim-$pkgver"
+  make DESTDIR="$pkgdir" install -j1
+  unlink "$pkgdir/usr/share/applications/uim.desktop"
+  install -Dm644 COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+}
+
+sha256sums=(
+  'f4a2facf1bce77f5047c19e62bb65672abfd9e545d3bdd1a193757fa895ab0aa'
+  'cb40ac5f19386fa0aa76ffc507878b81a4573a6ce72d20d551f841f368a2615c'
+  '09f6da1430b3628658ac0e0436e57c8f334886644fca4bb380c3c4a2be505730'
+)

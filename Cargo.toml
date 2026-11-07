@@ -1,0 +1,20 @@
+[package]
+name = "uim-fcitx5"
+version = "0.1.0"
+edition = "2024"
+description = "Fcitx5 input engine bridge for the UIM terminal frontend"
+license = "MIT"
+
+[lib]
+name = "uim_fcitx5"
+crate-type = ["cdylib"]
+
+[dependencies]
+dbus = "0.9"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[profile.release]
+strip = "debuginfo"
+

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# A text login must join the existing user bus, not create a second session.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus"
+fi
+
+if [ "$#" -eq 0 ]; then
+    set -- "${SHELL:-/bin/sh}" -l
+fi
+
+exec uim-fep -u fcitx5 -s lastline -e "$@"

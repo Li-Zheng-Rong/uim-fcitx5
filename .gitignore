@@ -1,0 +1,6 @@
+/target/
+/packaging/src/
+/packaging/pkg/
+/packaging/*.pkg.tar.zst
+/packaging/uim-*.tar.gz
+/packaging/*.log

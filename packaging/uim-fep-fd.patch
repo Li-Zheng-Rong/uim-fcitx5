@@ -1,0 +1,174 @@
+--- a/fep/uim-fep.c
++++ b/fep/uim-fep.c
+@@ -131,6 +131,7 @@
+ #include "key.h"
+ #include "read.h"
+ #include "helper.h"
++#include "scheme-fd-watch.h"
+ 
+ #define DEFAULT_STATUS LASTLINE
+ 
+@@ -212,6 +213,7 @@
+     printf("uim_init error\n");
+     exit(EXIT_FAILURE);
+   }
++  init_scheme_fd_watches();
+   g_context = uim_create_context(NULL, get_enc(), NULL, engine, NULL, commit_cb);
+   nr = uim_get_nr_im(g_context);
+   for (i = 0; i < nr; i++) {
+@@ -1114,7 +1116,7 @@
+       t.tv_sec = 0;
+       /* 0.1秒 */
+       t.tv_usec = 100000;
+-      if (my_select(nfd, &fds, &t) == 0) {
++      if (my_select(add_scheme_fd_watches(&fds, nfd), &fds, &t) == 0) {
+         /* タイムアウトした */
+         draw_commit_and_preedit();
+         debug2(("<end draw_commit_and_preedit>"));
+@@ -1140,7 +1142,7 @@
+       timeout_ptr = &timeout;
+     }
+ 
+-    selected = my_pselect(nfd, &fds, timeout_ptr, &s_orig_sigmask);
++    selected = my_pselect(add_scheme_fd_watches(&fds, nfd), &fds, timeout_ptr, &s_orig_sigmask);
+     if (selected == 0) {
+       flush_pending_pty_sequence();
+       continue;
+@@ -1183,6 +1185,11 @@
+     }
+ 
+     /* モードを変更する */
++    if (dispatch_scheme_fd_watches(&fds)) {
++      recover_if_fatal();
++      draw();
++    }
++
+     if (s_setmode_fd >= 0 && FD_ISSET(s_setmode_fd, &fds)) {
+       int start, end;
+ 
+@@ -1633,6 +1640,11 @@
+ void done(int exit_value)
+ {
+   flush_pending_pty_sequence();
++  if (g_context) {
++    uim_release_context(g_context);
++    g_context = NULL;
++  }
++  quit_scheme_fd_watches();
+   uim_quit();
+   quit_helper();
+   quit_escseq();
+--- /dev/null
++++ b/fep/scheme-fd-watch.h
+@@ -0,0 +1,111 @@
++/* Main-thread Scheme descriptor watches for native input-method plugins. */
++#ifndef UIM_FEP_SCHEME_FD_WATCH_H
++#define UIM_FEP_SCHEME_FD_WATCH_H
++
++#include <uim/uim-scm.h>
++
++struct scheme_fd_watch {
++  int fd;
++  uim_lisp callback;
++  struct scheme_fd_watch *next;
++};
++static struct scheme_fd_watch *scheme_fd_watches;
++
++static uim_lisp scheme_unwatch_fd(uim_lisp descriptor)
++{
++  int fd = uim_scm_c_int(descriptor);
++  struct scheme_fd_watch **link = &scheme_fd_watches;
++  while (*link) {
++    struct scheme_fd_watch *watch = *link;
++    if (watch->fd == fd) {
++      *link = watch->next;
++      uim_scm_gc_unprotect(&watch->callback);
++      free(watch);
++      break;
++    }
++    link = &watch->next;
++  }
++  return uim_scm_f();
++}
++
++static uim_lisp scheme_watch_fd(uim_lisp descriptor, uim_lisp callback)
++{
++  int fd = uim_scm_c_int(descriptor);
++  struct scheme_fd_watch *watch;
++  if (fd < 0 || fd >= FD_SETSIZE)
++    return uim_scm_f();
++  for (watch = scheme_fd_watches; watch; watch = watch->next) {
++    if (watch->fd == fd) {
++      watch->callback = callback;
++      return uim_scm_t();
++    }
++  }
++  watch = uim_malloc(sizeof(*watch));
++  watch->fd = fd;
++  watch->callback = callback;
++  watch->next = scheme_fd_watches;
++  uim_scm_gc_protect(&watch->callback);
++  scheme_fd_watches = watch;
++  return uim_scm_t();
++}
++
++static void *register_scheme_fd_watches(void *unused)
++{
++  (void)unused;
++  uim_scm_init_proc2("uim-fep-watch-fd", scheme_watch_fd);
++  uim_scm_init_proc1("uim-fep-unwatch-fd", scheme_unwatch_fd);
++  return NULL;
++}
++
++static void init_scheme_fd_watches(void)
++{
++  uim_scm_call_with_gc_ready_stack(register_scheme_fd_watches, NULL);
++}
++
++static int add_scheme_fd_watches(fd_set *fds, int nfd)
++{
++  struct scheme_fd_watch *watch;
++  for (watch = scheme_fd_watches; watch; watch = watch->next) {
++    FD_SET(watch->fd, fds);
++    if (watch->fd >= nfd)
++      nfd = watch->fd + 1;
++  }
++  return nfd;
++}
++
++static int dispatch_scheme_fd_watches(fd_set *fds)
++{
++  int fd, dispatched = 0;
++  /* Look up each live registration afresh: a callback may unwatch or close
++   * itself or another descriptor. No watch pointer survives the call. */
++  for (fd = 0; fd < FD_SETSIZE; fd++) {
++    struct scheme_fd_watch *watch;
++    if (!FD_ISSET(fd, fds))
++      continue;
++    for (watch = scheme_fd_watches; watch; watch = watch->next) {
++      if (watch->fd == fd) {
++        uim_lisp result = uim_scm_call_with_guard(uim_scm_eof(),
++                                                  watch->callback,
++                                                  uim_scm_null());
++        if (result == uim_scm_eof()) {
++          fprintf(stderr, "uim-fep: Scheme callback failed for descriptor %d\n", fd);
++          scheme_unwatch_fd(uim_scm_make_int(fd));
++        }
++        dispatched = 1;
++        break;
++      }
++    }
++  }
++  return dispatched;
++}
++
++static void quit_scheme_fd_watches(void)
++{
++  while (scheme_fd_watches) {
++    struct scheme_fd_watch *watch = scheme_fd_watches;
++    scheme_fd_watches = watch->next;
++    uim_scm_gc_unprotect(&watch->callback);
++    free(watch);
++  }
++}
++#endif

@@ -1,0 +1,11 @@
+--- a/fep/key.c
++++ b/fep/key.c
+@@ -375,6 +375,8 @@ static int csi_tilde_key2ukey(unsigned int key)
+     return UKey_F11;
+   case 24:
+     return UKey_F12;
++  case 25:
++    return UKey_F13;
+   default:
+     return UKey_Other;
+   }
